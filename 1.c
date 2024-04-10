@@ -1,5 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
 
-void main(){
-    printf("Hellow world!");
+int main() {
+    for (int i=0;i<10;i++)
+	{
+        print('%d', i);
+    }
 }
