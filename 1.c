@@ -5,6 +5,6 @@ int main() {
     for (int i=0;i<10;i++)
 	{
         print('%d', i);
-        print('%d', i * i); //// .. ////
+        print('%d', i + i);
     }
 }
