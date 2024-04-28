@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
-#include <fcntl.h>
 
 unsigned long lz77_compress (unsigned char *uncompressed_text, unsigned long uncompressed_size, unsigned char *compressed_text, unsigned char pointer_length_width)
 {
@@ -207,61 +206,41 @@ unsigned long file_lz77_compress(char *filename_in, char *filename_out, size_t m
     return compressed_size;
 }
 
-// Function to handle the entire file compression process
-void performFileCompression(InputData inputData) {
+int main() 
+{
+    InputData inputData;
     long originalSize;
     unsigned long compressedSize;
-    float actualCompressionPercentage = 0;
+    float actualCompressionPercentage;
 
-    // Check existence of the input file
-    if (access(inputData.inputFile, F_OK) == -1) {
-        perror("Input file not found");
-        return;
-    }
+    // Get user input
+    inputData = getUserInput();
 
-    // Get the original file size
+    // Get original file size
     FILE *in = fopen(inputData.inputFile, "rb");
     if (in == NULL) {
-        perror("Error opening the file.");
-        return;
+        perror("Error opening file.");
+        return 1;
     }
     originalSize = fsize(in);
     fclose(in);
 
-    // Compress the file with the specified compression percentage control loop
-    compressedSize = 0;
-    while (actualCompressionPercentage < inputData.compressionPercentage && compressedSize < originalSize) {
-        compressedSize = file_lz77_compress(inputData.inputFile, inputData.outputFile, 10000000, 8);
-        if (compressedSize == 0) {
-            printf("Error compressing the file.\n");
-            return;
-        }
+    // Compress the file
+    compressedSize = file_lz77_compress(inputData.inputFile, inputData.outputFile, 10000000, 8);
 
-        // Calculate the actual compression percentage
-        actualCompressionPercentage = 100.0 - ((float)compressedSize / originalSize * 100.0);
+    if (compressedSize == 0) {
+        printf("Error compressing file.\n");
+        return 1;
     }
 
-    // Report the result
+    // Calculate actual compression percentage
+    actualCompressionPercentage = 100.0 - ((float)compressedSize / originalSize * 100.0);
+
     if (actualCompressionPercentage >= inputData.compressionPercentage) {
         printf("Compression successful. Desired compression percentage achieved: %f%%\n", actualCompressionPercentage);
     } else {
         printf("Desired compression percentage not achieved. Current compression percentage: %f%%\n", actualCompressionPercentage);
     }
-}
-
-int main() {
-    InputData inputData;
-
-    // Retrieving user input
-    inputData = getUserInput();
-
-    if (access(inputData.inputFile, F_OK) == -1) {
-        perror("Input file not found");
-        return 1;
-    }
-
-    // Call the new function to perform the file compression process
-    performFileCompression(inputData);
 
     return 0;
 }
