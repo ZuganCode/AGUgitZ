@@ -1,5 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
-
+#include <io.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -95,7 +96,7 @@ char* get_file_name_from_path(char* path)
 }
 
 typedef struct s_archive {
-    char*file_name;
+    char* file_name;
     int file_count; // count of files
     char** included_files;
     int64_t compressing_current;
@@ -109,13 +110,13 @@ typedef struct s_archive {
     uint8_t archive_hash[16]; // setting by read_archive_header()
     int archive_files_count; //  setting by read_archive_header()
     double time_spent;
-    char*writing_file_name; //      make available to delete corrupted file then ERROR
+    char* writing_file_name; //      make available to delete corrupted file then ERROR
     FILE* writing_file_stream; //   make available to delete corrupted file then ERROR
     int64_t last_safe_eof; //       pos of last complete written file (used for truc file if ERROR)
 } Archive;
 
 typedef struct s_archive_file {
-    char*file_name;
+    char* file_name;
     int file_id;
     int64_t compressed_file_size;
     int64_t original_file_size;
@@ -147,11 +148,11 @@ Heap* heap_create(int size) {
     return h;
 }
 void heap_siftup(Heap* h, int i) {
-    if (i == 0) 
+    if (i == 0)
     {
         return;
     }
-    if (HEAP_COMPARATOR(h->arr[i], h->arr[heap_parent(i)], 1)) 
+    if (HEAP_COMPARATOR(h->arr[i], h->arr[heap_parent(i)], 1))
     {
         swap_Node(&h->arr[i], &h->arr[heap_parent(i)]);
         heap_siftup(h, heap_parent(i));
@@ -221,7 +222,7 @@ Node* l_build_tree(HuffmanCoder* coder) {
 
     for (int i = 0; i < 256; ++i) {
         if (coder->symbols_nodes[i].length > 0) {
-            
+
             heap_push(heap, &coder->symbols_nodes[i]);
         }
     }
@@ -486,11 +487,11 @@ void huffman_encode_symbols(
 
         bool is_stop = false;
         for (int i = 0; i < code.length; ++i) {
-            out_buffer[encoded_bits / 8] |= (unsigned char)((code.code[i] == '1') << (encoded_bits % 8)); 
+            out_buffer[encoded_bits / 8] |= (unsigned char)((code.code[i] == '1') << (encoded_bits % 8));
             encoded_bits++;
             if (encoded_bits == out_buffer_len * 8) {
-                if (i < code.length - 1) { 
-                    encoded_bits -= i + 1; 
+                if (i < code.length - 1) {
+                    encoded_bits -= i + 1;
                 }
                 else {
                     buffer_remain--;
@@ -507,7 +508,7 @@ void huffman_encode_symbols(
         buffer_remain--;
     }
 
-    
+
     fseek(stream, -buffer_remain, SEEK_CUR);
     processed_bytes -= buffer_remain;
 
@@ -562,7 +563,276 @@ void huffman_free(HuffmanCoder* coder) {
     free(coder->symbols_nodes);
 }
 
-//////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////
+
+Archive* archive_init() {
+    Archive* arc = (Archive*)calloc(1, sizeof(Archive));
+    arc->included_files = (char**)calloc(16, sizeof(char));
+    arc->processed_files = (char**)calloc(16, sizeof(char));
+    return arc;
+}
+
+Archive* archive_open(char* file_name, bool write_mode) {
+    Archive* arc = archive_init();
+    arc->file_name = file_name;
+    arc->archive_stream = fopen(file_name, write_mode ? "rb+" : "rb");
+
+    rewind(arc->archive_stream);
+
+    return arc;
+}
+
+Archive* archive_new(char* file_name) {
+    Archive* arc = archive_init();
+    arc->file_name = file_name;
+
+    arc->archive_stream = fopen(file_name, "wb");
+
+    return arc;
+}
+
+
+ArchiveFile* archive_get_files(Archive* arc, int max_files, int* count);
+
+int* get_files_ids_by_names(Archive* arc, char** files, int count_files, int* count_id) {
+    int count, s = 0;
+    int* final_ids = (int*)calloc(count_files, sizeof(int));
+    ArchiveFile* arc_files = archive_get_files(arc, -1, &count);
+    char* str;
+    for (int i = 0; i < count; ++i) {
+        for (int j = 0; j < count_files;j++) {
+            str = (char*)arc_files[i].file_hash;
+            if (!strcmp(str, files[j])) {
+                final_ids[s++] = i;
+            }
+        }
+    }
+    *count_id = s;
+    return final_ids;
+}
+
+void skip_file(FILE* stream) {
+    int64_t length;
+    fread(&length, sizeof(int64_t), 1, stream);
+    fseek(stream, length - (int)sizeof(length), SEEK_CUR);
+}
+
+
+// ptr in stream must be in start of the file
+// after function execute ptr won't change his position
+// file_id used only for set info.file_id
+ArchiveFile get_file_info(FILE* stream, int file_id) {
+    int64_t prev_pos = ftell(stream);
+
+    ArchiveFile info = { 0 };
+    //fseek(stream, sizeof(int64_t) + 16 + sizeof(time_t) + sizeof(int64_t), SEEK_CUR);
+
+    assert(1 == fread(&info.compressed_file_size, sizeof(int64_t), 1, stream));
+    assert(16 == fread(&info.file_hash, sizeof(uint8_t), 16, stream));
+
+    short code_len;
+    fread(&code_len, sizeof(short), 1, stream);
+
+    assert(code_len >= 0 && code_len <= 320);
+
+    fseek(stream, code_len, SEEK_CUR);
+
+    assert(1 == fread(&info.add_date, sizeof(time_t), 1, stream));
+    assert(1 == fread(&info.original_file_size, sizeof(int64_t), 1, stream));
+
+    short file_name_len;
+
+    assert(1 == fread(&file_name_len, sizeof(short), 1, stream));
+    assert(file_name_len > 0);
+
+    char* name = (char*)malloc(file_name_len + 1);
+    name[file_name_len] = 0;
+    assert(file_name_len == fread(name, sizeof(char), file_name_len, stream));
+
+    info.file_name = name;
+    info.file_id = file_id;
+
+
+    fseek(stream, prev_pos, SEEK_SET);
+    return info;
+}
+
+
+void read_total_huffman_code(HuffmanCoder* coder, FILE* from) {
+    short code_len;
+    fread(&code_len, sizeof(short), 1, from);
+
+    int64_t code_start_pos = ftell(from);
+    huffman_load_codes(coder, from);
+    //int64_t code_end_pos = ftell(from);
+}
+
+// write code length and code itself;
+// also compute hash if hash not NULL
+// return total written length in bytes
+int write_total_huffman_code(HuffmanCoder* coder, FILE* out_file) {
+    int64_t code_len_pos = ftell(out_file);
+
+    short zero = 0;
+    //fseek(out_file, sizeof(short), SEEK_CUR); // note code len pos
+    fwrite(&zero, sizeof(short), 1, out_file);
+
+    short code_len = (short)huffman_save_codes(coder, out_file); // write code
+    int64_t code_end_pos = ftell(out_file);
+
+    fseek(out_file, code_len_pos, SEEK_SET); // return to code len pos
+    fwrite(&code_len, sizeof(short), 1, out_file); // write code len pos
+
+    fseek(out_file, code_end_pos, SEEK_SET); // return to end of code
+
+    return (int)(code_len + sizeof(short));
+}
+
+void archive_add_file(Archive* arc, char* file_name) {
+    arc->included_files[arc->file_count++] = file_name;
+    /*dl_str_append(arc->included_files, file_name);*/
+}
+
+int64_t file_length(FILE* file) {
+    int64_t cur = ftell(file);
+    fseek(file, 0, SEEK_END);
+    int64_t file_size = ftell(file);
+    fseek(file, cur, SEEK_SET);
+    return file_size;
+}
+
+// return  written bytes count
+int make_and_write_block(
+    HuffmanCoder* coder,
+    FILE* from,
+    FILE* to,
+    unsigned char* buffer,
+    int buffer_size,
+    int* out_processed_bytes
+
+) {
+
+
+    int bits_encoded = 0;
+    int processed_bytes = 0;
+
+    memset(buffer, 0, buffer_size);
+
+    int64_t from_length = file_length(from);
+
+    int stop_reason;
+    huffman_encode_symbols(
+        coder,
+        from,
+        buffer,
+        buffer_size,
+        &bits_encoded,
+        &processed_bytes,
+        &stop_reason
+    );
+
+
+    if (bits_encoded > 0) {
+
+
+        // write original_size
+        short short_proc_bytes = (short)processed_bytes;
+        if (fwrite(&short_proc_bytes, sizeof(short), 1, to) != 1) {
+            assert(0);
+        }
+        // write padding_length
+        short padding = (short)((buffer_size * 8 - bits_encoded));     // padding to byte:  aaa00000 00000000 00000000
+        //                     ^^^^^ ^^^^^^^^ ^^^^^^^^
+        //                     this is padding
+
+        if (fwrite(&padding, sizeof(short), 1, to) != 1) {
+            assert(0);
+        }
+
+        int bytes_count = bits_encoded / 8;
+        if (padding % 8 != 0) {
+            bytes_count++;
+        }
+
+        //printf("Enc %ld %d\n", ftell(to), bits_encoded);
+
+        int to_write_length = buffer_size;
+        if (stop_reason == 1 || ftell(from) == from_length) {
+            to_write_length = bytes_count;
+            //printf("EOF\n");
+        }
+
+        //printf("%d ", bytes_count);
+        //if(stop_reason != EOF)
+
+        //        FILE* f = fopen("log.txt", "rt+");
+        //        fprintf(f, "%d\n", bytes_count);
+        //        fclose(f);
+
+                // write data
+        int written = (int)fwrite(buffer, sizeof(char), to_write_length, to);
+        assert(written == to_write_length);
+
+        *out_processed_bytes = processed_bytes;
+        return to_write_length + (int)(sizeof(short) + sizeof(short));
+    }
+
+    return 0;
+}
+
+void make_and_write_file(
+    Archive* arc,
+    HuffmanCoder* coder,
+    FILE* from,
+    FILE* to,
+    char* from_filename,
+    unsigned char* buffer,
+    int buffer_size
+) {
+
+    int64_t start_pos = ftell(to);
+    fseek(to, sizeof(int64_t) + 16, SEEK_CUR); // skip length and hash
+
+    write_total_huffman_code(coder, to);
+
+    time_t current_time = time(NULL);
+    fwrite(&current_time, sizeof(time_t), 1, to);
+
+    int64_t original_size = file_length(from);
+    fwrite(&original_size, sizeof(int64_t), 1, to);
+
+    arc->compressing_current = 0;
+    arc->compressing_total = original_size;
+
+    short short_file_name_length = strlen(from_filename);
+    fwrite(&short_file_name_length, sizeof(short), 1, to);
+
+    fwrite(from_filename, sizeof(char), short_file_name_length, to);
+
+    int processed_bytes = 0;
+    int64_t length = ftell(to) - start_pos;
+
+
+
+    int blocks_count = 0;
+
+    int64_t block_length = -1;
+    while (block_length) {
+        block_length = make_and_write_block(coder, from, to, buffer, buffer_size, &processed_bytes);
+        blocks_count++;
+        length += block_length;
+        arc->compressing_current += processed_bytes;
+    }
+
+
+    int64_t file_end_pos = ftell(to);
+    fseek(to, start_pos, SEEK_SET);
+
+    fwrite(&length, sizeof(int64_t), 1, to);
+    fseek(to, file_end_pos, SEEK_SET);
+
+}
+
 
 void file(char* input) {
     scanf_s("%s", input, sizeof(input));
