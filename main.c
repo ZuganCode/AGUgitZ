@@ -834,6 +834,291 @@ void make_and_write_file(
 }
 
 
+void archive_save(Archive* arc) {
+    HuffmanCoder* coder = huffman_coder_create();
+    arc->current_coder = coder;
+
+    FILE* out_file = arc->archive_stream;
+    arc->writing_file_stream = arc->archive_stream;
+    arc->writing_file_name = arc->file_name;
+
+    fwrite("\002ftarc", sizeof(char), sizeof("\002ftarc") - 1, out_file);
+
+    int64_t hash_pos = ftell(out_file);
+
+    //fseek(out_file, 16, SEEK_CUR);
+    int64_t zero = 0;
+    fwrite(&zero, sizeof(int64_t), 1, out_file);
+    fwrite(&zero, sizeof(int64_t), 1, out_file); // writing empty hash
+
+    int files_count = arc->archive_files_count + arc->file_count;
+    fwrite(&files_count, sizeof(int), 1, out_file);
+
+    uint8_t file_hash[16];
+
+    //    uint64_t _buffer64[4096 / 8] = {0};
+    //    unsigned char* buffer = (unsigned char*)_buffer64;
+
+        //unsigned char buffers[2][4096] = {0};
+
+    unsigned char** buffers = (unsigned char**)calloc(3, sizeof(unsigned char*));
+    for (int i = 0; i < 3; ++i) {
+        buffers[i] = (unsigned char*)calloc(4096, sizeof(unsigned char));
+    }
+
+    for (int i = 0; i < arc->archive_files_count; ++i) {
+        ArchiveFile info = get_file_info(out_file, i);
+
+        skip_file(out_file); // skip existing files
+    }
+
+    arc->last_safe_eof = ftell(out_file);
+    //printf("\n{%lld}\n", arc->last_safe_eof);
+
+    for (int i = 0; i < arc->file_count; ++i) {
+        char* file_to_compress = arc->included_files[i];
+        FILE* file = fopen(file_to_compress, "rb");
+
+        arc->compressing_total = 0; // because handling progress output when == 0
+
+        // HANDLING FILE
+        huffman_clear(coder);
+        huffman_handle_file(coder, file);
+        huffman_build_codes(coder);
+
+        char* in_archive_file_name = get_file_name_from_path(file_to_compress);
+
+
+        //COMPRESSING & WRITING FILE
+        make_and_write_file(
+            arc,
+            coder,
+            file,
+            out_file,
+            in_archive_file_name,
+            buffers[0],
+            4096
+        );
+
+
+        fclose(file);
+
+
+
+
+        arc->last_safe_eof = ftell(out_file);
+        //printf("\n{%lld}\n", arc->last_safe_eof);
+
+        arc->archive_files_count++;
+    }
+
+    huffman_free(coder);
+}
+
+// extract files with given ids and names
+// if some id and name point to same file extract will once
+// will create out_path if not exists
+
+void archive_extract(Archive* arc, int* files_ids, int files_id_count) {
+    HuffmanCoder* coder = huffman_coder_create();
+    FILE* compressed = arc->archive_stream;
+
+    char file_sign[sizeof("\002ftarc")] = { 0 };
+    fread(file_sign, sizeof(char), sizeof("\002ftarc") - 1, compressed);
+    assert(strcmp(file_sign, "\002ftarc") == 0);
+
+    uint8_t saved_hash[16];
+    fread(saved_hash, sizeof(uint8_t), 16, compressed);
+
+    int files_count;
+    fread(&files_count, sizeof(int), 1, compressed);
+
+    unsigned char buffer[4096] = { 0 };
+    unsigned char out_buffer[4096 * 8] = { 0 };
+
+    for (int i = 0; i < files_count; ++i) {
+
+        int64_t length;
+        fread(&length, sizeof(int64_t), 1, compressed);
+
+        for (int j = 0; j < files_id_count; j++) {
+            if (files_ids[j] == i) {
+                fseek(compressed, -(int)(sizeof(int64_t)), SEEK_CUR); // move ptr because length did read
+                ArchiveFile info = get_file_info(compressed, i);
+
+                //printf("[BEGIN %lld]", ftell(compressed));
+
+                char* full_path = info.file_name;
+
+                FILE* decompressed = fopen(full_path, "wb");
+
+                arc->writing_file_stream = decompressed;
+                arc->writing_file_name = full_path;
+                //printf("%s\n", full_path.value);
+
+
+                huffman_clear(coder);
+
+                /*       read_and_dec_file__multithread(
+                           arc,
+                           coder,
+                           compressed,
+                           decompressed,
+                           4096,
+                           NULL
+                       );*/
+
+                read_and_dec_file(
+                    arc,
+                    coder,
+                    compressed,
+                    decompressed,
+                    buffer,
+                    4096,
+                    out_buffer,
+                    4096 * 8
+                );
+
+                fclose(decompressed);
+                arc->writing_file_stream = NULL;
+            }
+        }
+        //else {
+        //    fseek(compressed, length - (int)sizeof(length), SEEK_CUR); // because length include length length :)
+        //}
+    }
+
+}
+
+
+// also update archive_hash field
+// rewind FILE on end
+
+ArchiveFile* archive_get_files(Archive* arc, int max_files, int* count) {
+    FILE* compressed = arc->archive_stream;
+
+    char file_sign[sizeof("\002ftarc")] = { 0 };
+    assert(
+        sizeof("\002ftarc") - 1 ==
+        fread(file_sign, sizeof(char), sizeof("\002ftarc") - 1, compressed)
+    );
+
+    assert(strcmp(file_sign, "\002ftarc") == 0);
+
+    uint8_t saved_hash[16];
+    fread(saved_hash, sizeof(uint8_t), 16, compressed);
+
+    int files_count;
+    fread(&files_count, sizeof(int), 1, compressed);
+
+    ArchiveFile* infos = (ArchiveFile*)calloc(files_count, sizeof(ArchiveFile));
+
+    if (max_files == -1) {
+        max_files = files_count;
+    }
+
+    *count = int_min(files_count, max_files);
+
+    for (int i = 0; i < int_min(files_count, max_files); ++i) {
+        ArchiveFile info = get_file_info(compressed, i);
+        infos[i] = info;
+        fseek(compressed, info.compressed_file_size, SEEK_CUR);
+    }
+
+    rewind(compressed);
+
+    return infos;
+}
+
+void archive_remove_files(Archive* arc, int* files_ids, int id_count) {
+
+    int64_t writing_ptr = ftell(arc->archive_stream);
+    int64_t reading_ptr = writing_ptr;
+    int64_t end_of_reading = writing_ptr;
+
+
+    unsigned char buffer[4096] = { 0 };
+
+    int original_files_count = arc->archive_files_count;
+
+    for (int i = 0; i < original_files_count; ++i) {
+        fseek(arc->archive_stream, reading_ptr, SEEK_SET);
+        ArchiveFile info = get_file_info(arc->archive_stream, i);
+        char flag = 0;
+
+        for (int j = 0; j < id_count;j++) {
+            if (files_ids[j] == i)
+            {
+                reading_ptr += info.compressed_file_size;
+                end_of_reading = reading_ptr;
+                arc->archive_files_count--;
+
+                flag = 1;
+
+                break;
+            }
+        }
+        if (flag) continue;
+
+        else {
+            end_of_reading = reading_ptr + info.compressed_file_size;
+        }
+
+        if (reading_ptr == writing_ptr) {
+            // don't need to copy
+            writing_ptr += info.compressed_file_size;
+            reading_ptr = end_of_reading;
+        }
+
+
+
+
+        while (reading_ptr != end_of_reading) {
+            int64_t block_length = int64_min(4096, end_of_reading - reading_ptr);
+            fseek(arc->archive_stream, reading_ptr, SEEK_SET);
+            assert(
+                block_length ==
+                fread(buffer, sizeof(unsigned char), block_length, arc->archive_stream)
+            );
+            reading_ptr += block_length;
+
+            fseek(arc->archive_stream, writing_ptr, SEEK_SET);
+            assert(
+                block_length ==
+                fwrite(buffer, sizeof(unsigned char), block_length, arc->archive_stream)
+            );
+            writing_ptr += block_length;
+
+        }
+
+    }
+
+    if (file_length(arc->archive_stream) == writing_ptr) {
+        return;
+    }
+
+    trunc_file(arc->archive_stream, writing_ptr);
+    fclose(arc->archive_stream);// not working without this
+    arc->archive_stream = fopen(arc->file_name, "rb+");
+
+}
+
+void archive_free(Archive* arc) {
+
+
+    if (arc->writing_file_stream == arc->archive_stream) {
+        assert(trunc_file(arc->archive_stream, arc->last_safe_eof));
+        fclose(arc->archive_stream);
+        arc->archive_stream = fopen(arc->file_name, "rb+");
+
+    }
+    else if (arc->writing_file_stream != NULL) {
+        // extracting file corrupted
+        fclose(arc->writing_file_stream);
+        assert(remove(arc->writing_file_name) == 0);
+    }
+}
+
 void file(char* input) {
     scanf_s("%s", input, sizeof(input));
 }
