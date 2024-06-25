@@ -1,14 +1,13 @@
-
 #define _CRT_SECURE_NO_WARNINGS
-#include <io.h>
-#include <time.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <assert.h>
 #include <string.h>
 #include <windows.h>
-#include <assert.h>
+#include <io.h>
 #include <math.h>
 
 bool trunc_file(FILE* file, int64_t length) {
@@ -29,7 +28,7 @@ typedef struct s_node {
     struct s_node* left;
     struct s_node* right;
 } Node;
-
+/////////////////////////////////////////////
 #define HEAP_COMPARATOR(a, b, dir) ( \
     (a)->length == (b)->length ?    \
         ((a)->value > (b)->value) : \
@@ -64,6 +63,7 @@ void pretty_bytes(char* buf, int64_t bytes) {
         sprintf(buf, "%.1f %s", count, suffixes[s]);
 }
 
+
 typedef struct s_huffman_code {
     int length;
     char code[256];
@@ -80,6 +80,7 @@ typedef struct s_huffman_coder {
     HuffmanCode* codes;
     Node* root_node;
 } HuffmanCoder;
+
 
 char* get_file_name_from_path(char* path)
 {
@@ -98,22 +99,24 @@ char* get_file_name_from_path(char* path)
 
 typedef struct s_archive {
     char* file_name;
-    int file_count; // count of files
+    int file_count; //count of files
     char** included_files;
     int64_t compressing_current;
     int64_t compressing_total;
     int64_t decompressing_current;
     int64_t decompressing_total;
+    enum e_work_stage work_stage;
     bool all_work_finished;
     char** processed_files;
     HuffmanCoder* current_coder;
     FILE* archive_stream;
     uint8_t archive_hash[16]; // setting by read_archive_header()
-    int archive_files_count; //  setting by read_archive_header()
+    int archive_files_count; //   setting by read_archive_header()
     double time_spent;
-    char* writing_file_name; //      make available to delete corrupted file then ERROR
-    FILE* writing_file_stream; //   make available to delete corrupted file then ERROR
-    int64_t last_safe_eof; //       pos of last complete written file (used for truc file if ERROR)
+    enum e_validating_status validating_status;
+    char* writing_file_name; // make available to delete corrupted file then ERROR
+    FILE* writing_file_stream; // make available to delete corrupted file then ERROR
+    int64_t last_safe_eof; // pos of last complete written file (used for truc file if ERROR)
 } Archive;
 
 typedef struct s_archive_file {
@@ -142,19 +145,17 @@ void swap_Node(Node** a, Node** b) {
 }
 
 Heap* heap_create(int size) {
-    Heap* h = calloc(1, sizeof(Heap));
+    Heap* h = (Heap*)calloc(1, sizeof(Heap));
     assert(h);
-    h->arr = calloc(size, sizeof(Node*));
+    h->arr = (Node**)calloc(size, sizeof(Node*));
     h->size = size;
     return h;
 }
 void heap_siftup(Heap* h, int i) {
-    if (i == 0)
-    {
+    if (i == 0) {
         return;
     }
-    if (HEAP_COMPARATOR(h->arr[i], h->arr[heap_parent(i)], 1))
-    {
+    if (HEAP_COMPARATOR(h->arr[i], h->arr[heap_parent(i)], 1)) {
         swap_Node(&h->arr[i], &h->arr[heap_parent(i)]);
         heap_siftup(h, heap_parent(i));
     }
@@ -207,7 +208,7 @@ void heap_free(Heap* h) {
     free(h);
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////
 
 int node_length(Node* node) {
     if (node == NULL)
@@ -217,13 +218,12 @@ int node_length(Node* node) {
 
 Node* l_build_tree(HuffmanCoder* coder) {
     assert(coder->intermediate_nodes == NULL);
-    Node* sub_nodes = calloc(256, sizeof(Node));
+    Node* sub_nodes = (Node*)calloc(256, sizeof(Node));
     coder->intermediate_nodes = sub_nodes;
     Heap* heap = heap_create(256 * 2);
 
     for (int i = 0; i < 256; ++i) {
         if (coder->symbols_nodes[i].length > 0) {
-
             heap_push(heap, &coder->symbols_nodes[i]);
         }
     }
@@ -247,6 +247,16 @@ Node* l_build_tree(HuffmanCoder* coder) {
     heap_free(heap);
     return root;
 }
+
+//char* str_concat_path(char*path1, char*path2) {
+//    if (path1.value[path1.length - 1] == '/' || path1.value[path1.length - 1] == '\\') {
+//        return str_concat(path1, path2);
+//    }
+//    char*norm_path1 = str_concat(path1, str("/"));
+//    char*res_path = str_concat(norm_path1, path2);
+//    str_free(norm_path1);
+//    return res_path;
+//}
 
 void l_get_code_rec(HuffmanCode* codes, Node* current, char* way, int way_i) {
     if (current->value != -1) {
@@ -275,7 +285,7 @@ void l_get_code_rec(HuffmanCode* codes, Node* current, char* way, int way_i) {
 void l_generate_symbols_nodes(HuffmanCoder* coder) {
     assert(coder->symbols_nodes == NULL);
 
-    Node* nodes = calloc(256, sizeof(Node));
+    Node* nodes = (Node*)calloc(256, sizeof(Node));
 
     for (int i = 0; i < 256; ++i) {
         nodes[i].value = i;
@@ -286,7 +296,7 @@ void l_generate_symbols_nodes(HuffmanCoder* coder) {
 }
 
 HuffmanCode* l_get_codes(Node* root, int n) {
-    HuffmanCode* codes = calloc(n, sizeof(HuffmanCode));
+    HuffmanCode* codes = (HuffmanCode*)calloc(n, sizeof(HuffmanCode));
     char way[256] = { 0 };
     l_get_code_rec(codes, root, way, 0);
     return codes;
@@ -294,11 +304,11 @@ HuffmanCode* l_get_codes(Node* root, int n) {
 
 
 HuffmanCoder* huffman_coder_create() {
-    HuffmanCoder* c = calloc(1, sizeof(HuffmanCoder));
+    HuffmanCoder* c = (HuffmanCoder*)calloc(1, sizeof(HuffmanCoder));
     assert(c);
 
     c->_read_buffer_size = 4096;
-    c->_read_buffer = malloc(c->_read_buffer_size * sizeof(char));
+    c->_read_buffer =(unsigned char*) malloc(c->_read_buffer_size * sizeof(char));
     assert(c->_read_buffer);
 
     return c;
@@ -342,12 +352,15 @@ void huffman_handle_file(HuffmanCoder* coder, FILE* file) {
     coder->read_progress = 1;
     rewind(file);
 }
-
 void huffman_build_codes(HuffmanCoder* coder) {
     l_generate_symbols_nodes(coder);
     Node* root = l_build_tree(coder);
     coder->root_node = root;
     coder->codes = l_get_codes(root, 256);
+
+    //    for (int i = 0; i < HUFF_ALPHA_LEN; ++i) {
+    //        printf("%d %s %d\n", i,  coder->codes[i].code, coder->codes[i].length);
+    //    }
 }
 
 
@@ -356,9 +369,9 @@ int read_bit(FILE* stream, unsigned char* buffer, int* bit_index) {
         fread(buffer, sizeof(char), 1, stream);
         *bit_index = 0;
     }
+    //printf("%d ", (*buffer & (1 << (*bit_index))) != 0);
     return (*buffer & (1 << (*bit_index)++)) != 0;
 }
-
 Node* l_load_code(
     FILE* stream,
     unsigned char* buffer,
@@ -387,11 +400,10 @@ Node* l_load_code(
         return cur;
     }
 }
-
 void huffman_load_codes(HuffmanCoder* coder, FILE* stream) {
 
     l_generate_symbols_nodes(coder);
-    Node* sub_nodes = calloc(256, sizeof(Node));
+    Node* sub_nodes = (Node*)calloc(256, sizeof(Node));
     coder->intermediate_nodes = sub_nodes;
     unsigned char buffer = 0;
     int bit_index = 8;
@@ -410,6 +422,7 @@ void huffman_load_codes(HuffmanCoder* coder, FILE* stream) {
 
 
 void append_bit(int bit_value, FILE* stream, unsigned char* buffer, int* bit_index) {
+    //printf("%d ", bit_value);
     if (*bit_index >= 8) {
         fwrite(buffer, sizeof(char), 1, stream);
         *buffer = 0;
@@ -453,6 +466,10 @@ HuffmanCode huffman_encode_symbol(HuffmanCoder* coder, unsigned char symbol) {
     return coder->codes[symbol];
 }
 
+// encode max possible bytes from stream to get bits <= out_buffer_len * 8
+// out_buffer_len : bytes count
+// out_bit_len : bits count
+// out_buffer must be clear
 void huffman_encode_symbols(
     HuffmanCoder* coder,
     FILE* stream,
@@ -488,14 +505,14 @@ void huffman_encode_symbols(
 
         bool is_stop = false;
         for (int i = 0; i < code.length; ++i) {
-            out_buffer[encoded_bits / 8] |= (unsigned char)((code.code[i] == '1') << (encoded_bits % 8));
+            out_buffer[encoded_bits / 8] |= (unsigned char)((code.code[i] == '1') << (encoded_bits % 8)); // TODO remake
             encoded_bits++;
             if (encoded_bits == out_buffer_len * 8) {
-                if (i < code.length - 1) {
-                    encoded_bits -= i + 1;
+                if (i < code.length - 1) { // need at lest one bit more
+                    encoded_bits -= i + 1; // do not take into account the already recorded bits
                 }
                 else {
-                    buffer_remain--;
+                    buffer_remain--; // full byte was used
                 }
                 is_stop = true;
                 break;
@@ -509,7 +526,8 @@ void huffman_encode_symbols(
         buffer_remain--;
     }
 
-
+    // move pointer on buffer_remain bytes back
+    // because they were not taken into account
     fseek(stream, -buffer_remain, SEEK_CUR);
     processed_bytes -= buffer_remain;
 
@@ -541,6 +559,13 @@ void huffman_decode_symbols(
             else {
                 current = current->left;
             }
+
+            //            current = (Node*)(
+            //                    (uint64_t)current->right * ((buffer[i] & (1 << j)) != 0) +
+            //                    (uint64_t)current->left * !(buffer[i] & (1 << j))
+            //                    );
+
+            //            current = (buffer[i] & (1 << j)) ? current->right : current->left;
 
             assert(current);
             if (current->value != -1) { // symbol founded
@@ -1221,22 +1246,29 @@ void archive_free(Archive* arc) {
     }
 }
 
+int test(char* file) {
+    FILE* f = fopen(file, "r");
+    if (f==NULL)
+        return 1;
+    else return 0;
+    fclose(f);
+}
+
 void file(char* input) {
     scanf_s("%s", input, sizeof(input));
+    if (test(input) == 1) {
+        printf("Файл не найден\n");
+        return;
+    }
 }
 
 void create(char* input, int* Verbose) {
     char FileName[50];
-    char WhatKindOfFile[4];
     char NextCommand[10];
     scanf_s("%s", FileName, sizeof(FileName));
-    scanf_s("%s", WhatKindOfFile, sizeof(WhatKindOfFile));
-    if ((strcmp(WhatKindOfFile, "zip") != 0) || strcmp(WhatKindOfFile, "tar") != 0) {
-        printf("Недопустимый формат файла! Требуется ввести формат \"zip\" или \"tar\"!\n");
-        return;
-    }
+
     scanf_s("%s", NextCommand, sizeof(NextCommand));
-    char InCatalog[100];
+    char InCatalog[1000];
     if ((strcmp(NextCommand, "--file") == 0) || strcmp(NextCommand, "-f") == 0) {
         file(InCatalog);
     }
@@ -1244,39 +1276,34 @@ void create(char* input, int* Verbose) {
         printf("Неверный аргумент команды, для просмотра команды используйте --help\n");
         return;
     }
-    scanf_s("%s", NextCommand, sizeof(NextCommand));
-    char OutCatalog[100];
-    if ((strcmp(NextCommand, "--output") == 0) || strcmp(NextCommand, "-o") == 0) {
-        file(OutCatalog);
-    }
-    else {
-        printf("Неверный аргумент команды, для просмотра команды используйте --help\n");
-        return;
-    }
-    scanf_s("%s", NextCommand, sizeof(NextCommand));
-    int Size;
-    if ((strcmp(NextCommand, "--size") == 0) || strcmp(NextCommand, "-s") == 0) {
-        scanf_s("%d", &Size);
-    }
-    else {
-        printf("Неверный аргумент команды, для просмотра команды используйте --help\n");
-        return;
-    }
-    printf("%s\n", InCatalog);
-    printf("%s\n", OutCatalog);
-    printf("%d\n", Size);
 
-    /*Сюда нужно добавить функции архивации и создания файла. входные данные для них:
-    строка FileName - имя файла
-    строка WhatKindOfFile - расширение (zip or tar)
-    строка InCatalog - путь к архивируемому файлу
-    строка OutCatalog - путь для сохранени архива
-    инт Size - процент сжатия */
-
+    Archive* arch = archive_new(FileName);
+    archive_add_file(arch, InCatalog);
+    archive_save(arch);
+    printf("Файл успешно заархивирован!!\n\n");
 }
 
 void extract(char* input, int* Verbose) {
-    printf("команда 2 выполнена\n");
+    char ArchName[50];
+    scanf_s("%s", ArchName, sizeof(ArchName));
+    if (test(ArchName)==1) {
+        printf("Файл архива не найден\n");
+        return;
+    }
+    int* ids;
+    int num;
+    scanf_s("%d", &num);
+    ids = (int*)malloc(num * sizeof(int));
+    for (int i = 0;i < num; i++) {
+        scanf_s("%d", &ids[i]);
+        ids[i] = ids[i] - 1;
+    }
+
+    Archive* arch = archive_open(ArchName, 1);
+    archive_extract(arch, ids, num);
+    archive_remove_files(arch, ids, num);
+    archive_save(arch);
+    printf("Файл успешно разархивирован!\n");
 }
 
 void list(char* input, int* Verbose) {
@@ -1284,21 +1311,52 @@ void list(char* input, int* Verbose) {
 }
 
 void add(char* input, int* Verbose) {
-    if (*Verbose == 1)
-        printf("Вербоузик робит\n");
-    printf("команда 4 выполнена\n");
+    char ArchName[50];
+    scanf_s("%s", ArchName, sizeof(ArchName));
+    if (test(ArchName)==1) {
+        printf("Файл архива не найден\n");
+            return;
+    }
+    char FileName[50];
+    scanf_s("%s", FileName, sizeof(FileName));
+    if (test(FileName)==1) {
+        printf("Файл не найден\n");
+        return;
+    }
 
+    Archive* arch = archive_open(ArchName, 1);
+    archive_add_file(arch, FileName);
+    archive_save(arch);
+    printf("Файл успешно добавлен в архив!\n");
 }
 
 void Delete(char* input, int* Verbose) {
-    printf("команда 5 выполнена\n");
+    char ArchName[50];
+    scanf_s("%s", ArchName, sizeof(ArchName));
+    if (test(ArchName) == 1) {
+        printf("Файл архива не найден\n");
+        return;
+    }
+    int* ids;
+    int num;
+    scanf_s("%d", &num);
+    ids = (int*)malloc(num * sizeof(int));
+    for (int i = 0;i < num; i++) {
+        scanf_s("%d", &ids[i]);
+        ids[i] = ids[i] - 1;
+    }
+    Archive* arch = archive_open(ArchName, 1);
+    archive_remove_files(arch, ids, num);
+    archive_save(arch);
+    printf("Файл успешно удален из архива!\n");
 }
 
 void help(char* input, int* Verbose) {
-    printf("\n--create (-с)\t Команада для архивации файлов, используется по шаблону: [--create имя_создаваемого_файла тип_сжимаемого_файла --file имя_архивируемого_файла --output Путь_для_сохранения_сжатого_файла --size Требуемый_процент Сжатия)");
-    printf("\n--extract (-e)\tКоманда для извлечения файлов из архива, используется по шаблону []");
+    printf("\n--create (-с)\t Команада для архивации файлов, используется по шаблону: [--create имя_создаваемого_файла --file имя_архивируемого_файла]");
+    printf("\n--extract (-x)\tКоманда для извлечения файлов из архива, используется по шаблону [--extract имя_разархивируемого_файла кол-во_разархивируемых_файлов порядковые_номера_файлов(через пробел, в кол-ве, указанном в предыдущей переменной )]");
     printf("\n--list (-l)\tКоманда для просмотра содержимого архива, используется по шаблону [--list путь_к_архиву]");
-
+    printf("\n--add (-a)\tКоманда для добавления в архив нового файла, используется по шаблону[--add имя_архива имя_добавляемого_файла]");
+    printf("\n--delete (-d)\tКоманда для удаления из архива файла, используется по шаблону[--delete имя_разархивируемого_файла кол-во_разархивируемых_файлов порядковые_номера_файлов(через пробел, в кол-ве, указанном в предыдущей переменной )]\n");
 }
 
 const char* commands[] = {
@@ -1327,7 +1385,7 @@ void (*actions[10])(char*, int*) = {
 };
 
 void executeCommand(char* command, int* exit, int* Verbose) {
-    if (strcmp(command, "exit") == 0) { //Если команда выйти, то значение переменной выхода - 1
+    if (strcmp(command, "--exit") == 0) { //Если команда выйти, то значение переменной выхода - 1
         *exit = 1;
         return;
     }
@@ -1358,7 +1416,6 @@ int main() {
     int exit = 0;
     int Verbose = 0;
     printf("Приветствуем Вас в нашем архиваторе! Чтобы получить информацию о работе в нем введите --help!\n");
-
     do {
         printf("Введите команду\n");
         scanf_s("%s", input, sizeof(input));
