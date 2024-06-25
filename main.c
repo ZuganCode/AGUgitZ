@@ -835,7 +835,6 @@ void make_and_write_file(
 }
 
 
-<<<<<<< HEAD
 // if hash_only == true
 //      func compute only hash AND coder, to, out_buffer can be NULL
 void read_and_dec_block(
@@ -937,8 +936,6 @@ void read_and_dec_file(
 }
 
 
-=======
->>>>>>> e652720606be4d8f9b7526a8f38cc8d5809092b1
 void archive_save(Archive* arc) {
     HuffmanCoder* coder = huffman_coder_create();
     arc->current_coder = coder;
